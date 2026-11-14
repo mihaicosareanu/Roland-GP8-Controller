@@ -40,8 +40,13 @@ static void leds_1_8(uint8_t mask)
 
 static void show_group(void)
 {
-    hal_led_set(10, group == 0);
-    hal_led_set(11, group == 1);
+    if (group == 0) {
+        hal_led_set(11, false);
+        hal_led_set(10, true);
+    } else {
+        hal_led_set(10, false);
+        hal_led_set(11, true);
+    }
 }
 
 static void display_bank(uint8_t b, bool dp)
