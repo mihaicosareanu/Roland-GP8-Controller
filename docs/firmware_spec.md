@@ -74,7 +74,7 @@ Note: because the threshold equals one 7-bit step, every accepted change of `ADC
 
 - The ADC behavior is **not active in `PROGRAM_MODE`** and **not active during `BANK_SELECT`**: the `POT` is not evaluated and no MIDI messages are sent.
 - It is active in `NORMAL_MODE` (section 5).
-- Behavior in `PEDAL_MODE` is defined in a later section.
+- It is active in `PEDAL_MODE` (section 7) with the same behavior and limits, except while the controller waits for the pedal response (section 7.1), when the `POT` is ignored.
 
 ---
 
@@ -101,7 +101,7 @@ The foot controller operates in one of three modes:
 | `Bank` | RAM | `1` | Bank number (1 to 8). |
 | `SWT` | RAM | `1` | Currently selected patch number (1 to 8), i.e. the number of the last patch switch pressed. |
 | `ADC_old` | RAM | First valid ADC reading; re-initialized every time `NORMAL_MODE` is entered or resumed (see section 1.2) | |
-| `b1` to `b8` | RAM | Defined in the `PEDAL_MODE` section (later) | Used in `PEDAL_MODE`. |
+| `b1` to `b8` | RAM | `0` | Binary values (0 or 1) used in `PEDAL_MODE` (section 7). Set to 0 when `PEDAL_MODE` is entered and when it is left. |
 
 Rules:
 
@@ -132,7 +132,9 @@ In `NORMAL_MODE` the 7-segment display always shows the current `Bank` digit (1 
 | 7 | A, B, C |
 | 8 | A, B, C, D, E, F, G |
 
-The decimal point (`SEG_DP`) is OFF in `NORMAL_MODE`. It is ON during `PROGRAM_MODE` and during `BANK_SELECT`.
+In `PEDAL_MODE` the display shows the letter `P` (segments A, B, E, F, G).
+
+The decimal point (`SEG_DP`) is OFF in `NORMAL_MODE` and in `PEDAL_MODE`. It is ON during `PROGRAM_MODE` and during `BANK_SELECT`.
 
 ---
 
@@ -210,7 +212,7 @@ Every time `NORMAL_MODE` is entered or resumed (after power-up, `PROGRAM_MODE`, 
 - `LED_10` / `LED_11` show the group (section 2.3).
 - The 7-segment display shows the current `Bank` digit with `SEG_DP` OFF (section 2.4).
 - `ADC_old` is re-initialized from the current `ADC` reading (section 1.2.2).
-- **No MIDI message is sent** when `NORMAL_MODE` is entered or resumed.
+- **No MIDI message is sent** by entering or resuming `NORMAL_MODE` itself. (The `MIDI_Program_Change` sent when `PEDAL_MODE` is left is part of the `PEDAL_MODE` exit sequence, section 7.4.)
 
 ### 5.2 Events
 
@@ -222,7 +224,7 @@ In `NORMAL_MODE` the firmware waits in a loop for one of the following events. A
 | `SW_9` pressed | See 5.2.2 |
 | `POT` moved by at least one 7-bit step | `MIDI_Sysex_Pot` is sent, as defined in section 1.2. |
 | `SW_10` pressed | The controller enters the `BANK_SELECT` subroutine (section 5.3). |
-| `SW_11` pressed | The controller enters `PEDAL_MODE` (defined in a later section). |
+| `SW_11` pressed | The controller enters `PEDAL_MODE` (section 7). |
 
 #### 5.2.1 Patch switch (`SW_1` to `SW_8`)
 
@@ -331,3 +333,153 @@ Test vectors:
 
 - Messages are queued and sent in order. Sending must not block the main loop.
 - At 31250 baud a byte takes about 320 µs, so a `MIDI_Program_Change` takes about 0.64 ms and a `MIDI_Sysex_Pot` about 3.2 ms.
+- Reception on the UART is also non-blocking (interrupt or DMA driven). Bytes received outside the response wait window (section 7.1) are discarded, in every mode.
+
+### 6.4 MIDI_Sysex_Pedal_Request
+
+Roland SysEx request, 11 bytes (hex): `F0 41 nn 13 11 00 00 00 32 4E F7`
+
+- `nn` is `MIDI_Channel` (0 to 15) in hex.
+- All other bytes are fixed. The checksum `4E` covers bytes 6 to 9 (`00 00 00 32`) and is always the same.
+
+The unit answers with a `MIDI_Sysex_Pedal_Response` (section 6.5).
+
+### 6.5 MIDI_Sysex_Pedal_Response
+
+A SysEx message of exactly **59 bytes** (numbering from 1) sent by the unit:
+
+| Byte(s) | Meaning |
+|---|---|
+| 1 to 7 | Header: `F0 41 nn 13 12 00 00`, with `nn` equal to `MIDI_Channel`. |
+| 8 | Only the lower nibble is used (`b8` to `b5`). The upper nibble is always 0. |
+| 9 | Only the lower nibble is used (`b4` to `b1`). The upper nibble is always 0. |
+| 10 to 57 | Other data, ignored by the firmware (but included in the checksum). |
+| 58 | Checksum (Roland), computed over bytes 6 to 57. |
+| 59 | `F7`. End of SysEx. |
+
+Mapping to `b1` to `b8`:
+
+```
+B = ((byte8 & 0x0F) << 4) | (byte9 & 0x0F)
+b_n = bit (n - 1) of B        (so b8 is the top bit, b1 is the bottom bit)
+```
+
+Equivalently: the lower nibble of byte 8 holds `b8 b7 b6 b5` (most significant bit first), and the lower nibble of byte 9 holds `b4 b3 b2 b1`.
+
+Example (abbreviated), channel 0:
+
+```
+F0 41 00 13 12 00 00 01 08 ...(48 bytes)... 4A F7
+```
+
+- Byte 8 is `01`: lower nibble `0001`, so `b8 = 0`, `b7 = 0`, `b6 = 0`, `b5 = 1`.
+- Byte 9 is `08`: lower nibble `1000`, so `b4 = 1`, `b3 = 0`, `b2 = 0`, `b1 = 0`.
+- Result: `b8..b1 = 0 0 0 1 1 0 0 0` (`B = 0x18`).
+
+Rules for accepting a response are in section 7.1.
+
+### 6.6 MIDI_Sysex_Pedal_Change
+
+Roland SysEx message, 11 bytes (hex): `F0 41 nn 13 12 00 00 bb cc dd F7`
+
+| Byte | Value | Meaning |
+|---|---|---|
+| 1 | `F0` | Fixed. |
+| 2 | `41` | Fixed. |
+| 3 | `nn` | `MIDI_Channel` (0 to 15) in hex. |
+| 4 | `13` | Fixed. |
+| 5 | `12` | Fixed. |
+| 6 | `00` | Fixed. |
+| 7 | `00` | Fixed. |
+| 8 | `bb` | `(B >> 4) & 0x0F`, i.e. `b8 b7 b6 b5`. The upper nibble is 0. |
+| 9 | `cc` | `B & 0x0F`, i.e. `b4 b3 b2 b1`. The upper nibble is 0. |
+| 10 | `dd` | Checksum (Roland). |
+| 11 | `F7` | Fixed. |
+
+`B` is built from the current `b1` to `b8` as in section 6.5 (reverse mapping: `B = sum of b_n << (n - 1)`).
+
+Checksum (covers bytes 6 to 9, always a 7-bit result):
+
+```
+dd = (0x80 - ((0x00 + 0x00 + bb + cc) & 0x7F)) & 0x7F
+```
+
+Test vectors (channel 0):
+
+| `b8..b1` | `bb` | `cc` | `dd` | Message |
+|---|---|---|---|---|
+| `00000000` | `00` | `00` | `00` | `F0 41 00 13 12 00 00 00 00 00 F7` |
+| `10011000` | `09` | `08` | `6F` | `F0 41 00 13 12 00 00 09 08 6F F7` |
+| `11011000` | `0D` | `08` | `6B` | `F0 41 00 13 12 00 00 0D 08 6B F7` |
+| `11111111` | `0F` | `0F` | `62` | `F0 41 00 13 12 00 00 0F 0F 62 F7` |
+
+Worked example. The response from section 6.5 gave `b8..b1 = 0 0 0 1 1 0 0 0`:
+
+1. `SW_8` is pressed. `b8` toggles to 1 and `LED_8` turns ON. Now `b8..b1 = 1 0 0 1 1 0 0 0`, so `bb = 09`, `cc = 08` and the message is `F0 41 00 13 12 00 00 09 08 6F F7`.
+2. `SW_7` is then pressed. `b7` toggles to 1 and `LED_7` turns ON. Now `b8..b1 = 1 1 0 1 1 0 0 0`, so `bb = 0D`, `cc = 08` and the message is `F0 41 00 13 12 00 00 0D 08 6B F7`.
+
+---
+
+## 7. PEDAL_MODE
+
+Entered when `SW_11` is accepted in `NORMAL_MODE` (section 5.2). In this mode `b1` to `b8` mirror the state of eight functions on the unit (`LED_1` to `LED_8`), which the user toggles with `SW_1` to `SW_8`.
+
+### 7.1 Entering PEDAL_MODE
+
+On entry:
+
+- `LED_9` turns ON.
+- The 7-segment display shows the letter `P` (segments A, B, E, F, G), with `SEG_DP` OFF.
+- `LED_10` / `LED_11` keep showing the group (section 2.3).
+- `b1` to `b8` are set to 0, and `LED_1` to `LED_8` mirror `b1` to `b8` at all times during `PEDAL_MODE` (1 = ON, 0 = OFF). They are therefore all OFF at this point.
+- A `MIDI_Sysex_Pedal_Request` is sent (section 6.4).
+- `Group`, `Bank` and `SWT` are unchanged.
+
+**Response wait window:**
+
+- The window starts when the request has been fully transmitted. It ends when a **valid** response is received, or after **120 ms**, whichever comes first.
+- During the window, all switches and the `POT` are ignored. The `SW_11` press that started `PEDAL_MODE` must also be released before another press is accepted (section 1.1.2).
+- A response is accepted only if it:
+  - is exactly 59 bytes long,
+  - has the header `F0 41 nn 13 12 00 00` with `nn` equal to `MIDI_Channel`, and
+  - has a valid checksum.
+- Anything else is discarded and the window continues until a valid response arrives or the timeout expires.
+- When a valid response arrives, `b1` to `b8` are set from it (section 6.5) and `LED_1` to `LED_8` are updated.
+- **On timeout:** `b1` to `b8` stay at 0, `LED_1` to `LED_8` stay OFF, nothing is sent, and there is no retry. See section 8.
+- Bytes received after the window ends (for example a late response) are discarded.
+
+### 7.2 Patch switches (`SW_1` to `SW_8`)
+
+After the wait window, when `SW_n` (n = 1 to 8) is accepted:
+
+1. `b_n` is toggled.
+2. `LED_n` toggles to match `b_n`.
+3. A `MIDI_Sysex_Pedal_Change` message is sent (section 6.6) built from the current `b1` to `b8`.
+
+### 7.3 Potentiometer
+
+Changing the `POT` triggers a `MIDI_Sysex_Pot` message with the same behavior and limits as in `NORMAL_MODE` (section 1.2), except during the response wait window.
+
+### 7.4 Leaving PEDAL_MODE (`SW_11`)
+
+When `SW_11` is accepted (after the wait window):
+
+1. `b1` to `b8` are set to 0.
+2. `LED_1` to `LED_8` are turned OFF.
+3. `LED_9` is turned OFF.
+4. A `MIDI_Program_Change` message is sent (section 6.1) using the current `Group`, `Bank` and `SWT` (the previously selected patch). This message is part of leaving `PEDAL_MODE`.
+5. The controller returns to `NORMAL_MODE`, resuming as described in section 5.1 (the LED for `SWT` lights up, the display shows `Bank`, `ADC_old` is re-initialized).
+
+The lockout from section 1.1.2 carries over: the `SW_11` press must be released before the next press is accepted.
+
+### 7.5 Other switches
+
+`SW_9` and `SW_10` are ignored in `PEDAL_MODE`.
+
+---
+
+## 8. Known Issues and Future TBD
+
+Items below are known limitations of this specification. They are accepted for now and may be revisited in a later stage.
+
+1. **No pedal response (timeout).** If the unit does not answer the `MIDI_Sysex_Pedal_Request` within 120 ms, `b1` to `b8` stay at 0 and nothing else happens (no retry, no error indication). The first switch press then sends a `MIDI_Sysex_Pedal_Change` built from all zeros plus the toggled bit, which overwrites the real state of the unit. Possible future improvements: retry, an error indication, or blocking switch presses until a valid response has been received.
