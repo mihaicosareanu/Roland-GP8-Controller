@@ -1,0 +1,4 @@
+.pio/
+tests/test_midi
+tests/test_switches
+tests/test_app
